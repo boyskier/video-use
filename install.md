@@ -15,7 +15,7 @@ Three things must exist on this machine:
 
 1. The `video-use` repo cloned somewhere stable.
 2. `ffmpeg` on `$PATH` (plus optional `yt-dlp` for online sources).
-3. An ElevenLabs API key in `.env` at the repo root (for Scribe transcription).
+3. Python deps, including `sherpa-onnx` for free local transcription (no API key needed).
 
 And one thing must be true about the current agent:
 
@@ -23,7 +23,7 @@ And one thing must be true about the current agent:
 
 ## Install prompt contract
 
-- Do everything yourself. Only ask the user for things you cannot generate — the ElevenLabs API key, and confirmation before `brew install`.
+- Do everything yourself. Only ask the user for confirmation before `brew install`. Transcription is local; don't ask for an API key.
 - Prefer a stable clone path like `~/Developer/video-use` (not `/tmp`, not `~/Downloads`).
 - The skill references helpers by bare name (`transcribe.py`, `render.py`). That works because SKILL.md and `helpers/` ship together — keep them as siblings when you register the skill.
 - After install, verify by running one real command against one real file. Don't declare success on file-existence checks alone.
@@ -89,9 +89,19 @@ Figure out which agent you are running under, and register once. A symlink of th
 
 If you can't tell which agent you're in, ask the user once: "which agent am I running under — Claude Code, Codex, or something else?" Then pick the right target.
 
-### 5. ElevenLabs API key
+### 5. Transcription models (local, free)
 
-Scribe (ElevenLabs) does all transcription. Without a key, nothing transcribes.
+Transcription runs locally by default. Pre-fetch the models (~230 MB, from GitHub releases):
+
+```bash
+python ~/Developer/video-use/helpers/transcribe_local.py --download-only
+```
+
+Optional: `pip install -e '.[whisper]'` adds the faster-whisper backend (needs huggingface.co reachable).
+
+### 5b. ElevenLabs API key (optional, paid)
+
+Only if the user explicitly wants hosted Scribe (`--backend elevenlabs`) — e.g. for speaker diarization. Skip otherwise.
 
 1. Check existing state in this order and stop at the first hit:
 
@@ -134,7 +144,7 @@ python ~/Developer/video-use/helpers/timeline_view.py --help >/dev/null && echo 
 ffprobe -version | head -1
 ```
 
-Full transcription test is optional at install time — it burns Scribe credits. Better to wait until the user hands you their first clip.
+Full transcription test is optional at install time. Better to wait until the user hands you their first clip.
 
 ### 7. Hand off
 
@@ -158,5 +168,5 @@ Tell the user, in one short message:
 - `yt-dlp` is optional. Don't block install on it; install lazily the first time a user asks to pull from a URL.
 - Node.js/npm are only needed for HyperFrames or Remotion slots. HyperFrames currently requires Node.js 22+.
 - HyperFrames, Remotion, and Manim are optional animation engines. Don't install or prefer one globally during setup; pick the engine per animation slot in `SKILL.md`. HyperFrames can run through `npx --yes hyperframes ...` in the slot directory. Remotion can be scaffolded with `npx create-video@latest` or installed inside the slot before rendering.
-- Never run transcription as part of install verification unless the user explicitly asks — Scribe costs real money.
+- Never run `--backend elevenlabs` unless the user explicitly asks — Scribe costs real money. Local backends are free.
 - If the user is on Linux without a package manager Claude recognizes, print the manual `ffmpeg` install URL and wait rather than guessing.

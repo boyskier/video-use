@@ -24,8 +24,8 @@ These are the things where deviation produces silent failures or broken output. 
 3. **30ms audio fades at every segment boundary** (`afade=t=in:st=0:d=0.03,afade=t=out:st={dur-0.03}:d=0.03`). Otherwise audible pops at every cut.
 4. **Overlays use `setpts=PTS-STARTPTS+T/TB`** to shift the overlay's frame 0 to its window start. Otherwise you see the middle of the animation during the overlay window.
 5. **Master SRT uses output-timeline offsets**: `output_time = word.start - segment_start + segment_offset`. Otherwise captions misalign after segment concat.
-6. **Never cut inside a word.** Snap every cut edge to a word boundary from the Scribe transcript.
-7. **Pad every cut edge.** Working window: 30–200ms. Scribe timestamps drift 50–100ms — padding absorbs the drift. Tighter for fast-paced, looser for cinematic.
+6. **Never cut inside a word.** Snap every cut edge to a word boundary from the transcript.
+7. **Pad every cut edge.** Working window: 30–200ms. Scribe timestamps drift 50–100ms, local SenseVoice ~100–150ms — padding absorbs the drift. On `sensevoice` transcripts lean toward the 100–200ms end. Tighter for fast-paced, looser for cinematic.
 8. **Word-level verbatim ASR only.** Never SRT/phrase mode (loses sub-second gap data). Never normalized fillers (loses editorial signal).
 9. **Cache transcripts per source.** Never re-transcribe unless the source file itself changed.
 10. **Parallel sub-agents for multiple animations.** Never sequential. Spawn N at once via the `Agent` tool; total wall time ≈ slowest one.
@@ -45,7 +45,7 @@ The skill lives in `video-use/`. User footage lives wherever they put it. All se
     ├── project.md               ← memory; appended every session
     ├── takes_packed.md          ← phrase-level transcripts, the LLM's primary reading view
     ├── edl.json                 ← cut decisions
-    ├── transcripts/<name>.json  ← cached raw Scribe JSON
+    ├── transcripts/<name>.json  ← cached Scribe-shaped JSON (any backend)
     ├── animations/slot_<id>/    ← per-animation source + render + reasoning
     ├── clips_graded/            ← per-segment extracts with grade + fades
     ├── master.srt               ← output-timeline subtitles
@@ -59,7 +59,7 @@ The skill lives in `video-use/`. User footage lives wherever they put it. All se
 
 First-time install lives in `install.md` (clone, deps, ffmpeg, skill registration, API key). Don't re-run it every session; on cold start just verify:
 
-- `ELEVENLABS_API_KEY` resolves — either in the environment or in `.env` at the video-use repo root. If missing, ask the user to paste one and write it to `.env` (never to the user's `<videos_dir>`).
+- Transcription is **local and free by default** (`--backend auto`). Check `python -c "import sherpa_onnx"` works; models download on first use from GitHub to `~/.cache/video-use/models`. Do NOT ask for an ElevenLabs key unless the user explicitly wants the paid `--backend elevenlabs`.
 - `ffmpeg` + `ffprobe` on PATH.
 - Python deps installed (`uv sync` or `pip install -e .` inside the repo).
 - Node.js + npm available if the session needs HyperFrames or Remotion slots. HyperFrames currently requires Node.js 22+.
@@ -71,8 +71,14 @@ Helpers (`helpers/transcribe.py`, `helpers/render.py`, etc.) live alongside this
 
 ## Helpers
 
-- **`transcribe.py <video>`** — single-file Scribe call. `--num-speakers N` optional. Cached.
-- **`transcribe_batch.py <videos_dir>`** — 4-worker parallel transcription. Use for multi-take.
+- **`transcribe.py <video>`** — single-file transcription. Cached. `--backend`:
+  - `auto` (default) → best installed local backend, normally `sensevoice`.
+  - `sensevoice` — local, free, CPU ~20× realtime. Korean/English/Japanese/Chinese/Cantonese. Word timestamps + audio events (music, laughter, applause, cough). Models come from GitHub, so it works in Claude Code on the web. Fillers (음, 어, um) are partly dropped and Korean word spacing is sometimes split (`조 금만`) — cut boundaries are still valid.
+  - `whisper` — local faster-whisper (`pip install -e '.[whisper]'`), ~100 languages, best local accuracy; weights come from huggingface.co (blocked in many sandboxes). `VIDEO_USE_WHISPER_MODEL=small|medium|large-v3`.
+  - `activity` — no words. Only `(speech -20dB)`, `(noise -34dB)`, `(tonal sound -24dB)` spans, i.e. where something audible happens. Use when nothing else works or the footage has no meaningful speech (b-roll, music, ambience).
+  - `elevenlabs` — paid hosted Scribe; only with an `ELEVENLABS_API_KEY`. Only backend with speaker diarization (`--num-speakers N`).
+  Every backend also tags audible non-speech gaps (`(noise …dB)` = broadband: wind, hum, crowd; `(tonal sound …dB)` = music, beeps, tones). A gap with no event is real silence.
+- **`transcribe_batch.py <videos_dir>`** — transcribe every video in a folder (same `--backend`). Use for multi-take.
 - **`pack_transcripts.py --edit-dir <dir>`** — `transcripts/*.json` → `takes_packed.md` (phrase-level, break on silence ≥ 0.5s).
 - **`timeline_view.py <video> <start> <end>`** — filmstrip + waveform PNG. On-demand visual drill-down. **Not a scan tool** — use it at decision points, not constantly.
 - **`render.py <edl.json> -o <out>`** — per-segment extract → concat → overlays (PTS-shifted) → subtitles LAST. `--preview` for 720p fast. `--build-subtitles` to generate master.srt inline.
@@ -328,7 +334,7 @@ Things that consistently fail regardless of style:
 - **Hierarchical pre-computed codec formats** with USABILITY / tone tags / shot layers. Over-engineering. Derive from the transcript at decision time.
 - **Hand-tuned moment-scoring functions.** The LLM picks better than any heuristic you'll write.
 - **Whisper SRT / phrase-level output.** Loses sub-second gap data. Always word-level verbatim.
-- **Running Whisper locally on CPU.** Slow and it normalizes fillers. Use hosted Scribe.
+- **Phrase-level Whisper (`openai-whisper` defaults) on CPU.** Slow and it normalizes fillers. Use the `sensevoice` or `whisper` backend of `transcribe.py`, which keep word timestamps.
 - **Burning subtitles into base before compositing overlays.** Overlays hide them. (Hard Rule 1.)
 - **Single-pass filtergraph when you have overlays.** Double re-encodes. Use per-segment extract → concat.
 - **Linear animation easing.** Looks robotic. Always cubic.

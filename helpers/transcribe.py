@@ -1,13 +1,21 @@
-"""Transcribe a video with ElevenLabs Scribe.
+"""Transcribe a video — locally for free by default, or with ElevenLabs Scribe.
 
-Extracts mono 16kHz audio via ffmpeg, uploads to Scribe with verbatim +
-diarize + audio events + word-level timestamps, writes the full response
-to <edit_dir>/transcripts/<video_stem>.json.
+Extracts mono 16kHz audio via ffmpeg, then runs one backend and writes a
+Scribe-shaped JSON (word-level timestamps + audio events) to
+<edit_dir>/transcripts/<video_stem>.json.
 
-Cached: if the output file already exists, the upload is skipped.
+Backends (--backend, or VIDEO_USE_TRANSCRIBE_BACKEND):
+    auto        default: best installed local backend (see transcribe_local.py)
+    sensevoice  local SenseVoice, ko/en/ja/zh/yue, works without Hugging Face
+    whisper     local faster-whisper, needs huggingface.co for the weights
+    activity    local, no words: speech / sound / silence map only
+    elevenlabs  hosted Scribe (paid, needs ELEVENLABS_API_KEY; adds diarization)
+
+Cached: if the output file already exists, nothing runs.
 
 Usage:
     python helpers/transcribe.py <video_path>
+    python helpers/transcribe.py <video_path> --backend activity
     python helpers/transcribe.py <video_path> --edit-dir /custom/edit
     python helpers/transcribe.py <video_path> --language en
     python helpers/transcribe.py <video_path> --num-speakers 2
@@ -27,8 +35,11 @@ import time
 import wave
 from pathlib import Path
 
-import requests
+from transcribe_local import resolve_backend, transcribe_wav
 
+
+BACKEND_CHOICES = ["auto", "sensevoice", "whisper", "activity", "elevenlabs"]
+DEFAULT_BACKEND = os.environ.get("VIDEO_USE_TRANSCRIBE_BACKEND", "auto")
 
 SCRIBE_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 
@@ -98,6 +109,8 @@ def call_scribe(
     if num_speakers:
         data["num_speakers"] = str(num_speakers)
 
+    import requests
+
     with open(audio_path, "rb") as f:
         resp = requests.post(
             SCRIBE_URL,
@@ -128,11 +141,12 @@ def transcript_path(edit_dir: Path, video: Path, audio_track: int = 0) -> Path:
 def transcribe_one(
     video: Path,
     edit_dir: Path,
-    api_key: str,
+    api_key: str | None = None,
     language: str | None = None,
     num_speakers: int | None = None,
     verbose: bool = True,
     audio_track: int = 0,
+    backend: str = DEFAULT_BACKEND,
 ) -> Path:
     """Transcribe a single video. Returns path to transcript JSON.
 
@@ -160,24 +174,29 @@ def transcribe_one(
         audio = Path(tmp) / f"{video.stem}.wav"
         extract_audio(video, audio, audio_track)
 
-        # Uploading silence costs the same as uploading speech and returns
-        # nothing, so catch the wrong-track case before paying for it.
+        # Silence transcribes to nothing (and on Scribe still costs money), so
+        # catch the wrong-track case before running anything.
         peak = peak_dbfs(audio)
         if peak < -60.0:
             raise RuntimeError(
                 f"track {audio_track + 1} of {video.name} is silent "
-                f"(peak {peak:.1f} dBFS) - not uploading. "
+                f"(peak {peak:.1f} dBFS) - not transcribing. "
                 + (f"The file has {n_tracks} audio tracks; try --audio-track "
                    + " or ".join(str(i) for i in range(n_tracks) if i != audio_track) + "."
                    if n_tracks > 1 else "Check the source audio.")
             )
 
-        size_mb = audio.stat().st_size / (1024 * 1024)
-        if verbose:
-            print(f"  uploading {video.stem}.wav ({size_mb:.1f} MB)", flush=True)
-        payload = call_scribe(audio, api_key, language, num_speakers)
+        if backend == "elevenlabs":
+            size_mb = audio.stat().st_size / (1024 * 1024)
+            if verbose:
+                print(f"  uploading {video.stem}.wav ({size_mb:.1f} MB)", flush=True)
+            payload = call_scribe(audio, api_key or load_api_key(), language, num_speakers)
+        else:
+            if verbose:
+                print(f"  transcribing locally ({resolve_backend(backend)})", flush=True)
+            payload = transcribe_wav(audio, backend, language)
 
-    out_path.write_text(json.dumps(payload, indent=2))
+    out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
     dt = time.time() - t0
 
     if verbose:
@@ -190,7 +209,7 @@ def transcribe_one(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Transcribe a video with ElevenLabs Scribe")
+    ap = argparse.ArgumentParser(description="Transcribe a video (local by default)")
     ap.add_argument("video", type=Path, help="Path to video file")
     ap.add_argument(
         "--edit-dir",
@@ -208,7 +227,14 @@ def main() -> None:
         "--num-speakers",
         type=int,
         default=None,
-        help="Optional number of speakers when known. Improves diarization accuracy.",
+        help="Optional number of speakers when known. Improves diarization accuracy "
+             "(elevenlabs only; local backends label everyone speaker_0).",
+    )
+    ap.add_argument(
+        "--backend",
+        choices=BACKEND_CHOICES,
+        default=DEFAULT_BACKEND,
+        help="Transcription backend (default: auto = best installed local backend).",
     )
     ap.add_argument(
         "--audio-track",
@@ -225,12 +251,13 @@ def main() -> None:
         sys.exit(f"video not found: {video}")
 
     edit_dir = (args.edit_dir or (video.parent / "edit")).resolve()
-    api_key = load_api_key()
+    api_key = load_api_key() if args.backend == "elevenlabs" else None
 
     transcribe_one(
         video=video,
         edit_dir=edit_dir,
         api_key=api_key,
+        backend=args.backend,
         language=args.language,
         num_speakers=args.num_speakers,
         audio_track=args.audio_track,
